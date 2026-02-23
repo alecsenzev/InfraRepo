@@ -1,0 +1,14 @@
+heat_template_version: 2015-10-15
+description: Create a simple server for Lab 3
+
+resources:
+  # Описываем сервер
+  my_ml_server:
+    type: OS::Nova::Server
+    properties:
+      name: Nikita_Alcsentsev-ML-Server       # Имя будущей машины
+      image: ubuntu-22.04        # Образ
+      flavor: m1.small           # Размер
+      key_name: Nikita_Alecsentsev           # ключ
+      networks:
+        - network: sutdents-net
