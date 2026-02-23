@@ -1,208 +1,226 @@
 pipeline {
-    agent { label params.AGENT_LABEL }
-
-    options {
-        timestamps()
-        timeout(time: 30, unit: 'MINUTES')
-    }
-
-    parameters {
-        string(name: 'AGENT_LABEL', defaultValue: 'Nikita_Alecsentsev', description: 'Jenkins agent label')
-        choice(name: 'DASH_MODE', choices: ['test', 'prod'], description: 'Which Dash UI to run')
-        string(name: 'DASH_PORT', defaultValue: '8051', description: 'Dash port (test=8050, prod=8051)')
-    }
-
+    agent any
+    
     environment {
+        APP_REPO = 'https://github.com/alecsenzev/SimpleApp.git'
+        APP_BRANCH = 'main'
         STACK_NAME = 'Nikita-stack'
         HEAT_TEMPLATE = 'server.yaml'
-        KEY_PATH = '/home/ubuntu/Nikita_Alecsentsev.pem'
-        REMOTE_USER = 'debian'
-        APP_REPO = 'https://github.com/alecsenzev/RestoringValuesSPbPU.git'
     }
-
+    
     stages {
         stage('Checkout InfraRepo') {
             steps {
                 git branch: 'main', url: 'https://github.com/alecsenzev/InfraRepo.git'
             }
         }
-
+        
         stage('Create Infrastructure via Heat') {
             steps {
                 script {
-                    sh '''
-                        . /home/ubuntu/openrc.sh
-                        # Удалить предыдущий стек, если существует
-                        openstack stack show $STACK_NAME && openstack stack delete $STACK_NAME --yes --wait || true
-                        # Создать новый стек
-                        openstack stack create -t $HEAT_TEMPLATE --wait $STACK_NAME
-                    '''
-                }
-            }
-        }
-
-        stage('Get Target Server IP') {
-            steps {
-                script {
-                    // Получаем физический ID сервера из стека
-                    env.SERVER_ID = sh(
-                        script: """
-                            . /home/ubuntu/openrc.sh
-                            openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1
-                        """,
-                        returnStdout: true
-                    ).trim()
-                    
-                    if (SERVER_ID.isEmpty()) {
-                        error "Не удалось получить ID сервера из стека"
-                    }
-                    
-                    echo "Server ID: ${SERVER_ID}"
-                    
-                    // Получаем IP по ID сервера
-                    env.TARGET_IP = sh(
-                        script: """
-                            . /home/ubuntu/openrc.sh
-                            openstack server show "$SERVER_ID" -f shell | grep addresses | cut -d'=' -f2 | tr -d '"' | awk -F'=' '{print \$2}'
-                        """,
-                        returnStdout: true
-                    ).trim()
-                    
-                    if (env.TARGET_IP.isEmpty()) {
-                        error "Не удалось получить IP адрес сервера"
-                    }
-                    
-                    echo "Target server IP: ${TARGET_IP}"
-                }
-            }
-        }
-
-        stage('Deploy Application on Target Server') {
-            steps {
-                script {
                     sh """
-                        ssh -o StrictHostKeyChecking=no -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP} '
-                            set -e
-                            echo "=== Клонирование репозитория ==="
-                            git clone $APP_REPO ~/app || (cd ~/app && git pull)
-                            cd ~/app
-                            
-                            echo "=== Создание виртуального окружения ==="
-                            python3 -m venv .venv
-                            . .venv/bin/activate
-                            
-                            echo "=== Установка зависимостей ==="
-                            pip install -U pip
-                            pip install -r requirements.txt
-                        '
+                        . /home/ubuntu/openrc.sh
+                        
+                        # Проверяем существование стека и удаляем если есть
+                        if openstack stack show $STACK_NAME > /dev/null 2>&1; then
+                            echo "Удаляем существующий стек..."
+                            openstack stack delete $STACK_NAME --yes --wait
+                        fi
+                        
+                        # Создаем новый стек
+                        echo "Создаем новый стек..."
+                        openstack stack create -t $HEAT_TEMPLATE --wait $STACK_NAME
                     """
                 }
             }
         }
-
-        stage('Run Application & Health Checks') {
+        
+        stage('Get Target Server IP') {
             steps {
-                sh """
-                    ssh -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP} '
-                        cd ~/app
-                        . .venv/bin/activate
+                script {
+                    sh """
+                        . /home/ubuntu/openrc.sh
                         
-                        # Очистка переменных окружения
-                        export LOG_LEVEL=INFO
-                        export WEBSOCKET_HOST=0.0.0.0
-                        export BUSINESS_HTTP_BASE=http://${TARGET_IP}:8000
-                        export BUSINESS_BIND_HOST=0.0.0.0
-                        export BUSINESS_BIND_PORT=8000
-                        export DASH_HOST=0.0.0.0
-                        export DASH_PORT=${DASH_PORT}
-
-                        echo "=== Очистка занятых портов ==="
-                        for p in 8000 8050 8051 8092 8093 8094 8095; do
-                            sudo fuser -k \${p}/tcp 2>/dev/null || true
-                        done
-
-                        mkdir -p run_output
-
-                        echo "=== Запуск компонентов ==="
-                        # Запуск симулятора
-                        python Simulator/simulator.py > run_output/simulator.log 2>&1 &
-                        echo \$! > run_output/simulator.pid
-                        echo "Симулятор запущен с PID: \$(cat run_output/simulator.pid)"
-                        sleep 3
-
-                        # Запуск receiver
-                        python Reciever/reciever.py > run_output/reciever.log 2>&1 &
-                        echo \$! > run_output/reciever.pid
-                        echo "Receiver запущен с PID: \$(cat run_output/reciever.pid)"
-                        sleep 3
-
-                        # Запуск business
-                        python Business/business.py > run_output/business.log 2>&1 &
-                        echo \$! > run_output/business.pid
-                        echo "Business запущен с PID: \$(cat run_output/business.pid)"
-                        sleep 3
-
-                        # Запуск Dash
-                        if [ "${DASH_MODE}" = "test" ]; then
-                            python GUI/dash_app_test.py > run_output/dash.log 2>&1 &
-                        else
-                            python GUI/dash_app_prod.py > run_output/dash.log 2>&1 &
+                        # Получаем ID сервера из стека
+                        SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
+                        echo "Server ID: \$SERVER_ID"
+                        
+                        # Получаем IP адрес сервера (исправленная команда)
+                        SERVER_IP=\$(openstack server show \$SERVER_ID -f value -c addresses | grep -oE '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}' | head -1)
+                        
+                        # Если не нашли IP через regex, пробуем другой способ
+                        if [ -z "\$SERVER_IP" ]; then
+                            SERVER_IP=\$(openstack server show \$SERVER_ID -f shell | grep "^addresses=" | cut -d'=' -f2 | tr -d '"' | grep -oE '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}' | head -1)
                         fi
-                        echo \$! > run_output/dash.pid
-                        echo "Dash запущен с PID: \$(cat run_output/dash.pid)"
-                        sleep 5
-
-                        echo "=== Проверка health-эндпоинтов ==="
-                        curl -fsS http://127.0.0.1:8000/healthz > run_output/health_business.json || echo "Business health check failed" > run_output/health_business.json
-                        curl -fsS http://127.0.0.1:${DASH_PORT}/healthz > run_output/health_dash.json || echo "Dash health check failed" > run_output/health_dash.json
-
-                        echo "=== Приложение работает, сбор данных 30 секунд ==="
-                        echo "Дашборд доступен по адресу: http://${TARGET_IP}:${DASH_PORT}"
-                        sleep 30
-
-                        echo "=== Остановка процессов ==="
-                        kill \$(cat run_output/simulator.pid) 2>/dev/null || true
-                        kill \$(cat run_output/reciever.pid) 2>/dev/null || true
-                        kill \$(cat run_output/business.pid) 2>/dev/null || true
-                        kill \$(cat run_output/dash.pid) 2>/dev/null || true
-                        sleep 2
-
-                        echo "=== Упаковка артефактов ==="
-                        tar -czf artifacts.tgz run_output Reciever/*.csv Business/*.csv 2>/dev/null || tar -czf artifacts.tgz run_output
-                        echo "Артефакты упакованы в artifacts.tgz"
-                    '
-                """
+                        
+                        # Проверяем что IP получен
+                        if [ -z "\$SERVER_IP" ]; then
+                            echo "ОШИБКА: Не удалось получить IP адрес сервера"
+                            exit 1
+                        fi
+                        
+                        echo "SERVER_IP=\$SERVER_IP"
+                        echo \$SERVER_IP > server_ip.txt
+                    """
+                    
+                    // Читаем IP из файла и сохраняем в переменную
+                    def serverIp = readFile('server_ip.txt').trim()
+                    echo "✅ IP адрес сервера: ${serverIp}"
+                    
+                    // Сохраняем IP для следующих стадий
+                    env.TARGET_SERVER_IP = serverIp
+                }
             }
         }
-
+        
+        stage('Deploy Application on Target Server') {
+            steps {
+                script {
+                    // Проверяем доступность сервера по SSH
+                    sh """
+                        echo "Ожидаем доступность сервера ${env.TARGET_SERVER_IP} по SSH..."
+                        
+                        # Ждем пока сервер станет доступен (до 2 минут)
+                        for i in {1..12}; do
+                            if nc -z -w 5 ${env.TARGET_SERVER_IP} 22 2>/dev/null; then
+                                echo "✅ Сервер доступен по SSH"
+                                break
+                            fi
+                            echo "Попытка \$i из 12: сервер еще не доступен, ждем 10 сек..."
+                            sleep 10
+                        done
+                        
+                        # Клонируем репозиторий приложения и деплоим
+                        ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_SERVER_IP} "
+                            # Клонируем репозиторий
+                            if [ -d ~/SimpleApp ]; then
+                                rm -rf ~/SimpleApp
+                            fi
+                            
+                            git clone ${APP_REPO} ~/SimpleApp
+                            cd ~/SimpleApp
+                            
+                            # Устанавливаем зависимости и запускаем
+                            pip3 install --user -r requirements.txt
+                            
+                            # Останавливаем предыдущий процесс если был
+                            pkill -f app.py || true
+                            
+                            # Запускаем приложение в screen
+                            screen -dm bash -c 'python3 app.py'
+                            
+                            echo "✅ Приложение запущено"
+                        "
+                    """
+                }
+            }
+        }
+        
+        stage('Run Application & Health Checks') {
+            steps {
+                script {
+                    // Ждем пока приложение запустится
+                    sleep(15)
+                    
+                    // Проверяем здоровье приложения
+                    sh """
+                        echo "Проверка здоровья приложения на ${env.TARGET_SERVER_IP}:8000..."
+                        
+                        # Проверяем доступность приложения (до 30 сек)
+                        for i in {1..6}; do
+                            HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://${env.TARGET_SERVER_IP}:8000/health 2>/dev/null || echo "000")
+                            
+                            if [ "\$HTTP_CODE" = "200" ]; then
+                                echo "✅ Приложение работает, HTTP код: \$HTTP_CODE"
+                                curl -s http://${env.TARGET_SERVER_IP}:8000/health
+                                echo ""
+                                break
+                            else
+                                echo "Попытка \$i из 6: приложение еще не отвечает (HTTP \$HTTP_CODE), ждем 5 сек..."
+                                sleep 5
+                            fi
+                        done
+                        
+                        # Основная проверка
+                        curl -f http://${env.TARGET_SERVER_IP}:8000/health || exit 1
+                    """
+                    
+                    echo "✅ Все проверки здоровья пройдены успешно!"
+                }
+            }
+        }
+        
         stage('Collect Artifacts') {
             steps {
-                sh """
-                    scp -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP}:~/app/artifacts.tgz . || echo "No artifacts found"
-                """
-                archiveArtifacts artifacts: 'artifacts.tgz', fingerprint: true, allowEmptyArchive: true
+                script {
+                    // Собираем информацию о деплое
+                    sh """
+                        . /home/ubuntu/openrc.sh
+                        
+                        # Получаем информацию о стеке
+                        STACK_STATUS=\$(openstack stack show $STACK_NAME -f value -c stack_status)
+                        
+                        # Получаем информацию о сервере
+                        SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
+                        SERVER_STATUS=\$(openstack server show \$SERVER_ID -f value -c status)
+                        
+                        # Создаем файл с информацией о деплое
+                        cat > deployment-info.txt << EOF
+                        Деплой приложения на $(date)
+                        
+                        Информация о сервере:
+                        - IP адрес: ${env.TARGET_SERVER_IP}
+                        - ID сервера: \$SERVER_ID
+                        - Статус сервера: \$SERVER_STATUS
+                        
+                        Информация о стеке Heat:
+                        - Имя стека: $STACK_NAME
+                        - Статус стека: \$STACK_STATUS
+                        
+                        Информация о приложении:
+                        - URL приложения: http://${env.TARGET_SERVER_IP}:8000
+                        - Health check: http://${env.TARGET_SERVER_IP}:8000/health
+                        EOF
+                        
+                        echo "✅ Информация сохранена в deployment-info.txt"
+                    """
+                    
+                    // Сохраняем артефакты
+                    archiveArtifacts artifacts: 'deployment-info.txt', fingerprint: true
+                }
             }
         }
     }
-
+    
     post {
         always {
-            // Очистка портов на агенте
-            sh '''
-                for p in 8000 8050 8051; do
-                    fuser -k ${p}/tcp 2>/dev/null || true
-                done
-            '''
-            echo "Сборка завершена. Статус: ${currentBuild.result ?: 'SUCCESS'}"
-        }
-        
-        success {
-            echo "✅ Сборка успешно выполнена! Дашборд был доступен по адресу: http://${TARGET_IP}:${DASH_PORT}"
-            echo "Артефакты сохранены."
+            script {
+                // Очищаем порты
+                sh """
+                    fuser -k 8000/tcp 2>/dev/null || true
+                    fuser -k 8050/tcp 2>/dev/null || true
+                    fuser -k 8051/tcp 2>/dev/null || true
+                """
+                
+                // Выводим информацию о завершении
+                if (currentBuild.currentResult == 'SUCCESS') {
+                    echo "✅ Сборка успешно завершена!"
+                    if (env.TARGET_SERVER_IP) {
+                        echo "Приложение доступно по адресу: http://${env.TARGET_SERVER_IP}:8000"
+                    }
+                } else {
+                    echo "❌ Сборка завершилась с ошибкой: ${currentBuild.currentResult}"
+                    echo "Проверьте логи выше для деталей."
+                }
+            }
         }
         
         failure {
-            echo "❌ Сборка завершилась с ошибкой. Проверьте логи выше."
+            echo "❌ Деплой не удался. Проверьте логи и повторите попытку."
+        }
+        
+        success {
+            echo "🎉 Деплой успешно завершен!"
         }
     }
 }
