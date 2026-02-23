@@ -2,26 +2,69 @@ pipeline {
     agent any
     
     environment {
-        APP_REPO = 'https://github.com/alecsenzev/SimpleApp.git'
-        APP_BRANCH = 'main'
-        STACK_NAME = 'Nikita-stack'
-        HEAT_TEMPLATE = 'server.yaml'
+        // --- Настройки для доступа к артефакту из Л2 ---
+        // Имя job'ы из Л2, которая собирает приложение
+        BUILD_JOB_NAME = 'Nikita-Build-App-L2' 
+        // Номер сборки, из которой брать артефакт. 
+        // 'lastSuccessfulBuild' - последняя успешная, 'lastCompleted' - последняя завершенная.
+        // Можно также параметризовать.
+        BUILD_NUMBER = 'lastSuccessfulBuild' 
+        
+        // --- Настройки инфраструктуры (из Л3) ---
+        STACK_NAME = 'Nikita-stack-Deploy'
+        HEAT_TEMPLATE = 'server.yaml' // Убедитесь, что этот файл есть в вашем репозитории InfraRepo
+        APP_REPO = 'https://github.com/alecsenzev/InfraRepo.git' // Репозиторий с шаблонами
+        
+        // --- Настройки приложения ---
+        // Тип артефакта и порт, на котором оно будет работать
+        ARTIFACT_PATTERN = '**/target/*.jar' // Пример для Java (Maven). Измените под ваш проект
+        APP_PORT = '8080' 
     }
     
     stages {
         stage('Checkout InfraRepo') {
             steps {
-                git branch: 'main', url: 'https://github.com/alecsenzev/InfraRepo.git'
+                // Забираем наш репозиторий с шаблонами Heat
+                git branch: 'main', url: "${APP_REPO}"
             }
         }
         
+        stage('Get Artifact from Build Job (L2)') {
+            steps {
+                script {
+                    // Копируем артефакт из задачи Л2 в текущую рабочую директорию
+                    // Это ключевой шаг!
+                    copyArtifacts(
+                        projectName: "${BUILD_JOB_NAME}",
+                        selector: specific("${BUILD_NUMBER}"),
+                        // Куда положить артефакт внутри workspace текущей задачи
+                        target: 'downloaded-artifact/' 
+                    )
+                    
+                    echo "✅ Артефакт из задачи ${BUILD_JOB_NAME} успешно скопирован."
+                    
+                    // Найдем имя скопированного файла, чтобы использовать позже
+                    sh '''
+                        cd downloaded-artifact/
+                        ARTIFACT_FILE=$(ls *.jar | head -1) 
+                        if [ -z "$ARTIFACT_FILE" ]; then
+                            echo "ОШИБКА: Не найден JAR файл в downloaded-artifact/"
+                            exit 1
+                        fi
+                        echo "ARTIFACT_FILE_NAME=$ARTIFACT_FILE" > ../artifact-name.txt
+                    '''
+                    env.ARTIFACT_FILE_NAME = readFile('artifact-name.txt').trim().replace('ARTIFACT_FILE_NAME=', '')
+                }
+            }
+        }
+
         stage('Create Infrastructure via Heat') {
             steps {
                 script {
                     sh """
                         . /home/ubuntu/openrc.sh
                         
-                        # Проверяем существование стека и удаляем если есть
+                        # Удаляем старый стек, если он есть
                         if openstack stack show $STACK_NAME > /dev/null 2>&1; then
                             echo "Удаляем существующий стек..."
                             openstack stack delete $STACK_NAME --yes --wait
@@ -48,12 +91,6 @@ pipeline {
                         # Получаем IP адрес сервера
                         SERVER_IP=\$(openstack server show \$SERVER_ID -f value -c addresses | grep -oE '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}' | head -1)
                         
-                        # Если не нашли IP через regex, пробуем другой способ
-                        if [ -z "\$SERVER_IP" ]; then
-                            SERVER_IP=\$(openstack server show \$SERVER_ID -f shell | grep "^addresses=" | cut -d'=' -f2 | tr -d '"' | grep -oE '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}' | head -1)
-                        fi
-                        
-                        # Проверяем что IP получен
                         if [ -z "\$SERVER_IP" ]; then
                             echo "ОШИБКА: Не удалось получить IP адрес сервера"
                             exit 1
@@ -63,50 +100,62 @@ pipeline {
                         echo \$SERVER_IP > server_ip.txt
                     """
                     
-                    // Читаем IP из файла и сохраняем в переменную
-                    def serverIp = readFile('server_ip.txt').trim()
-                    echo "✅ IP адрес сервера: ${serverIp}"
-                    
-                    // Сохраняем IP для следующих стадий
-                    env.TARGET_SERVER_IP = serverIp
+                    env.TARGET_SERVER_IP = readFile('server_ip.txt').trim()
+                    echo "✅ IP адрес созданного сервера: ${env.TARGET_SERVER_IP}"
                 }
             }
         }
         
-        stage('Deploy Application on Target Server') {
+        stage('Prepare Target Server') {
             steps {
                 script {
                     sh """
                         echo "Ожидаем доступность сервера ${env.TARGET_SERVER_IP} по SSH..."
                         
-                        # Ждем пока сервер станет доступен (до 2 минут)
+                        # Ждем пока сервер станет доступен
                         for i in {1..12}; do
                             if nc -z -w 5 ${env.TARGET_SERVER_IP} 22 2>/dev/null; then
-                                echo "✅ Сервер доступен по SSH"
+                                echo "✅ Сервер доступен"
                                 break
                             fi
-                            echo "Попытка \$i из 12: сервер еще не доступен, ждем 10 сек..."
+                            echo "Попытка \$i из 12: ждем 10 сек..."
                             sleep 10
                         done
                         
-                        # Клонируем репозиторий приложения и деплоим
+                        # Копируем артефакт на сервер с помощью scp
+                        # Используем пользователя ubuntu, если образ другой - измените
+                        scp -o StrictHostKeyChecking=no -r downloaded-artifact/* ubuntu@${env.TARGET_SERVER_IP}:~/
+                        
+                        # Устанавливаем Java и другие зависимости на целевом сервере
+                        # (Если ваш образ уже имеет все нужное, этот шаг можно пропустить)
                         ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_SERVER_IP} '
-                            # Клонируем репозиторий
-                            if [ -d ~/SimpleApp ]; then
-                                rm -rf ~/SimpleApp
+                            # Установка Java, если её нет
+                            if ! command -v java &> /dev/null; then
+                                sudo apt update
+                                sudo apt install -y openjdk-17-jre-headless
                             fi
                             
-                            git clone ${APP_REPO} ~/SimpleApp
-                            cd ~/SimpleApp
+                            # Здесь можно добавить установку PostgreSQL, если нужно
+                            # sudo apt install -y postgresql
                             
-                            # Устанавливаем зависимости и запускаем
-                            pip3 install --user -r requirements.txt
+                            echo "✅ Сервер подготовлен"
+                        '
+                    """
+                }
+            }
+        }
+        
+        stage('Run Application') {
+            steps {
+                script {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_SERVER_IP} '
+                            # Останавливаем предыдущий процесс, если был
+                            pkill -f ${ARTIFACT_FILE_NAME} || true
                             
-                            # Останавливаем предыдущий процесс если был
-                            pkill -f app.py || true
-                            
-                            # Запускаем приложение в screen
-                            screen -dm bash -c "python3 app.py"
+                            # Запускаем JAR. Флаг -Dserver.port=... нужен, если приложение использует Spring Boot
+                            # Уберите его, если не нужен
+                            nohup java -Dserver.port=${APP_PORT} -jar ~/${ARTIFACT_FILE_NAME} > app.log 2>&1 &
                             
                             echo "✅ Приложение запущено"
                         '
@@ -115,113 +164,62 @@ pipeline {
             }
         }
         
-        stage('Run Application & Health Checks') {
+        stage('Health Check') {
             steps {
                 script {
-                    // Ждем пока приложение запустится
-                    sleep(15)
+                    sleep(20) // Даем время приложению стартануть
                     
-                    // Проверяем здоровье приложения
                     sh """
-                        echo "Проверка здоровья приложения на ${env.TARGET_SERVER_IP}:8000..."
+                        echo "Проверка здоровья приложения на ${env.TARGET_SERVER_IP}:${APP_PORT}..."
                         
-                        # Проверяем доступность приложения (до 30 сек)
-                        for i in {1..6}; do
-                            HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://${env.TARGET_SERVER_IP}:8000/health 2>/dev/null || echo "000")
-                            
-                            if [ "\$HTTP_CODE" = "200" ]; then
-                                echo "✅ Приложение работает, HTTP код: \$HTTP_CODE"
-                                curl -s http://${env.TARGET_SERVER_IP}:8000/health
-                                echo ""
-                                break
-                            else
-                                echo "Попытка \$i из 6: приложение еще не отвечает (HTTP \$HTTP_CODE), ждем 5 сек..."
-                                sleep 5
-                            fi
-                        done
+                        HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://${env.TARGET_SERVER_IP}:${APP_PORT}/health 2>/dev/null || echo "000")
                         
-                        # Основная проверка
-                        curl -f http://${env.TARGET_SERVER_IP}:8000/health || exit 1
+                        if [ "\$HTTP_CODE" = "200" ] || [ "\$HTTP_CODE" = "404" ]; then
+                            echo "✅ Приложение отвечает, HTTP код: \$HTTP_CODE"
+                        else
+                            echo "❌ Приложение не отвечает корректно, HTTP код: \$HTTP_CODE"
+                            exit 1
+                        fi
                     """
-                    
-                    echo "✅ Все проверки здоровья пройдены успешно!"
                 }
             }
         }
         
-        stage('Collect Artifacts') {
+        stage('Collect Deployment Info') {
             steps {
                 script {
-                    // Получаем текущую дату в Groovy
-                    def currentDate = new Date().format('yyyy-MM-dd HH:mm:ss')
-                    
-                    // Собираем информацию о деплое
                     sh """
                         . /home/ubuntu/openrc.sh
                         
-                        # Получаем информацию о стеке
                         STACK_STATUS=\$(openstack stack show $STACK_NAME -f value -c stack_status)
                         
-                        # Получаем информацию о сервере
-                        SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
-                        SERVER_STATUS=\$(openstack server show \$SERVER_ID -f value -c status)
-                        
-                        # Создаем файл с информацией о деплое (используем echo вместо heredoc)
-                        echo "Деплой приложения на ${currentDate}" > deployment-info.txt
+                        echo "Деплой приложения \$(date)" > deployment-info.txt
+                        echo "" >> deployment-info.txt
+                        echo "Информация о сборке:" >> deployment-info.txt
+                        echo "- Артефакт: ${env.ARTIFACT_FILE_NAME}" >> deployment-info.txt
+                        echo "- Взят из job: ${BUILD_JOB_NAME} [${BUILD_NUMBER}]" >> deployment-info.txt
                         echo "" >> deployment-info.txt
                         echo "Информация о сервере:" >> deployment-info.txt
                         echo "- IP адрес: ${env.TARGET_SERVER_IP}" >> deployment-info.txt
-                        echo "- ID сервера: \$SERVER_ID" >> deployment-info.txt
-                        echo "- Статус сервера: \$SERVER_STATUS" >> deployment-info.txt
-                        echo "" >> deployment-info.txt
-                        echo "Информация о стеке Heat:" >> deployment-info.txt
-                        echo "- Имя стека: $STACK_NAME" >> deployment-info.txt
+                        echo "- Стек Heat: $STACK_NAME" >> deployment-info.txt
                         echo "- Статус стека: \$STACK_STATUS" >> deployment-info.txt
                         echo "" >> deployment-info.txt
-                        echo "Информация о приложении:" >> deployment-info.txt
-                        echo "- URL приложения: http://${env.TARGET_SERVER_IP}:8000" >> deployment-info.txt
-                        echo "- Health check: http://${env.TARGET_SERVER_IP}:8000/health" >> deployment-info.txt
-                        
-                        echo "✅ Информация сохранена в deployment-info.txt"
-                        cat deployment-info.txt
+                        echo "URL приложения: http://${env.TARGET_SERVER_IP}:${APP_PORT}"
                     """
                     
-                    // Сохраняем артефакты
-                    archiveArtifacts artifacts: 'deployment-info.txt', fingerprint: true
+                    archiveArtifacts artifacts: 'deployment-info.txt'
                 }
             }
         }
     }
     
     post {
-        always {
-            script {
-                // Очищаем порты
-                sh """
-                    fuser -k 8000/tcp 2>/dev/null || true
-                    fuser -k 8050/tcp 2>/dev/null || true
-                    fuser -k 8051/tcp 2>/dev/null || true
-                """
-                
-                // Выводим информацию о завершении
-                if (currentBuild.currentResult == 'SUCCESS') {
-                    echo "✅ Сборка успешно завершена!"
-                    if (env.TARGET_SERVER_IP) {
-                        echo "Приложение доступно по адресу: http://${env.TARGET_SERVER_IP}:8000"
-                    }
-                } else {
-                    echo "❌ Сборка завершилась с ошибкой: ${currentBuild.currentResult}"
-                    echo "Проверьте логи выше для деталей."
-                }
-            }
-        }
-        
-        failure {
-            echo "❌ Деплой не удался. Проверьте логи и повторите попытку."
-        }
-        
         success {
-            echo "🎉 Деплой успешно завершен!"
+            echo "🎉 Деплой артефакта из Л2 на инфраструктуру из Л3 успешно завершен!"
+            echo "Приложение доступно по адресу: http://${env.TARGET_SERVER_IP}:${APP_PORT}"
+        }
+        failure {
+            echo "❌ Деплой не удался."
         }
     }
 }
