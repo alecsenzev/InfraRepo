@@ -31,7 +31,7 @@ pipeline {
             steps {
                 script {
                     sh '''
-                        source ~/openrc.sh
+                        . ~/openrc.sh
                         # Удалить предыдущий стек, если существует
                         openstack stack show $STACK_NAME && openstack stack delete $STACK_NAME --yes --wait || true
                         # Создать новый стек
@@ -40,7 +40,8 @@ pipeline {
                 }
             }
         }
-
+        
+        
         stage('Get Target Server IP') {
             steps {
                 script {
