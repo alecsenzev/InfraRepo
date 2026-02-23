@@ -13,7 +13,7 @@ pipeline {
     }
 
     environment {
-        STACK_NAME = 'Nikita-stack'
+        STACK_NAME = 'Nikita-ML-Server'
         HEAT_TEMPLATE = 'server.yaml'
         KEY_PATH = '/home/ubuntu/Nikita_Alecsentsev.pem'
         REMOTE_USER = 'debian'
