@@ -13,7 +13,7 @@ pipeline {
     }
 
     environment {
-        STACK_NAME = 'Nikita-ML-Server'
+        STACK_NAME = 'Nikita-stack'
         HEAT_TEMPLATE = 'server.yaml'
         KEY_PATH = '/home/ubuntu/Nikita_Alecsentsev.pem'
         REMOTE_USER = 'debian'
@@ -44,30 +44,34 @@ pipeline {
         stage('Get Target Server IP') {
             steps {
                 script {
-                    // Получаем IP созданного сервера (ищем по части имени)
+                    // Получаем физический ID сервера из стека
+                    env.SERVER_ID = sh(
+                        script: """
+                            . /home/ubuntu/openrc.sh
+                            openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (SERVER_ID.isEmpty()) {
+                        error "Не удалось получить ID сервера из стека"
+                    }
+                    
+                    echo "Server ID: ${SERVER_ID}"
+                    
+                    // Получаем IP по ID сервера
                     env.TARGET_IP = sh(
                         script: """
                             . /home/ubuntu/openrc.sh
-                            openstack server list --name ".*${STACK_NAME}.*" -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
+                            openstack server show "$SERVER_ID" -f value -c addresses | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
                     ).trim()
                     
                     if (env.TARGET_IP.isEmpty()) {
-                        // Если не нашли, пробуем получить через stack show
-                        echo "Поиск по имени не дал результатов, пробуем альтернативный метод..."
-                        env.TARGET_IP = sh(
-                            script: """
-                                . /home/ubuntu/openrc.sh
-                                openstack stack show $STACK_NAME -f value -c outputs | grep -o '"ip":[^,]*' | cut -d'"' -f4 || true
-                            """,
-                            returnStdout: true
-                        ).trim()
-                    }
-                    
-                    if (env.TARGET_IP.isEmpty()) {
                         error "Не удалось получить IP адрес сервера"
                     }
+                    
                     echo "Target server IP: ${TARGET_IP}"
                 }
             }
@@ -105,9 +109,9 @@ pipeline {
                         
                         # Очистка переменных окружения
                         export LOG_LEVEL=INFO
-                        export WEBSOCKET_HOST=127.0.0.1
-                        export BUSINESS_HTTP_BASE=http://127.0.0.1:8000
-                        export BUSINESS_BIND_HOST=127.0.0.1
+                        export WEBSOCKET_HOST=0.0.0.0
+                        export BUSINESS_HTTP_BASE=http://${TARGET_IP}:8000
+                        export BUSINESS_BIND_HOST=0.0.0.0
                         export BUSINESS_BIND_PORT=8000
                         export DASH_HOST=0.0.0.0
                         export DASH_PORT=${DASH_PORT}
@@ -153,6 +157,7 @@ pipeline {
                         curl -fsS http://127.0.0.1:${DASH_PORT}/healthz > run_output/health_dash.json || echo "Dash health check failed" > run_output/health_dash.json
 
                         echo "=== Приложение работает, сбор данных 30 секунд ==="
+                        echo "Дашборд доступен по адресу: http://${TARGET_IP}:${DASH_PORT}"
                         sleep 30
 
                         echo "=== Остановка процессов ==="
@@ -192,7 +197,8 @@ pipeline {
         }
         
         success {
-            echo "✅ Сборка успешно выполнена! Артефакты сохранены."
+            echo "✅ Сборка успешно выполнена! Дашборд был доступен по адресу: http://${TARGET_IP}:${DASH_PORT}"
+            echo "Артефакты сохранены."
         }
         
         failure {
