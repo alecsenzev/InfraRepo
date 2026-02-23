@@ -1,14 +1,26 @@
 heat_template_version: 2015-10-15
-description: Create a simple server for Lab 3
+description: Create a server for RestoringValuesSPbPU project
 
 resources:
   # Описываем сервер
-  my_ml_server:
+  my_server:
     type: OS::Nova::Server
     properties:
-      name: Nikita_Alcsentsev-ML-Server       # Имя будущей машины
-      image: ubuntu-22.04        # Образ
-      flavor: m1.small           # Размер
-      key_name: Nikita_Alecsentsev           # ключ
+      name: Nikita-ML-Server       # Имя будущей машины
+      image: ubuntu-22.04           # Образ
+      flavor: m1.small              # Размер
+      key_name: Nikita_Alecsentsev  # Ключ
       networks:
-        - network: sutdents-net
+        - network: sutdents-net     # Сеть
+      
+      # Метаданные для идентификации
+      metadata:
+        project: "RestoringValuesSPbPU"
+        owner: "Nikita Alecsentsev"
+      
+      # Скрипт для первоначальной настройки (user_data)
+      user_data: |
+        #!/bin/bash
+        echo "Сервер создан через Heat" > /etc/motd
+        echo "Проект: RestoringValuesSPbPU" >> /etc/motd
+        echo "Дата создания: $(date)" >> /etc/motd
