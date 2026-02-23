@@ -1,74 +1,35 @@
-heat_template_version: 2015-10-15
-description: Create a server for RestoringValuesSPbPU project
-
-parameters:
-  network:
-    type: string
-    default: sutdents-net
-    description: Network to use
-
-resources:
-  # Описываем сервер
-  my_server:
-    type: OS::Nova::Server
-    properties:
-      name: Nikita-ML-Server
-      image: debian-10
-      flavor: m1.tiny
-      key_name: Nikita_Alecsentsev
-      networks:
-        - network: { get_param: network }
-      
-      # Добавляем security group
-      security_groups:
-        - default
-        - students-general
-      
-      metadata:
-        project: "RestoringValuesSPbPU"
-        owner: "Nikita Alecsentsev"
-      
-      user_data: |
-        #!/bin/bash
-        echo ">>> Начало настройки сервера"
-        
-        # Обновляем систему
-        apt-get update
-        apt-get install -y python3-pip python3-venv git postgresql openjdk-17-jre-headless curl
-        
-        # Настраиваем SSH для доступа по ключу
-        mkdir -p /home/debian/.ssh
-        chmod 700 /home/debian/.ssh
-        
-        # Копируем публичный ключ из метаданных
-        curl http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key > /home/debian/.ssh/authorized_keys 2>/dev/null || echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDH..." > /home/debian/.ssh/authorized_keys
-        
-        chmod 600 /home/debian/.ssh/authorized_keys
-        chown -R debian:debian /home/debian/.ssh
-        
-        # Настраиваем SSH сервер
-        sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-        sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-        systemctl restart sshd
-        
-        echo ">>> Сервер настроен через Heat" > /etc/motd
-        echo ">>> Проект: RestoringValuesSPbPU" >> /etc/motd
-        echo ">>> Дата создания: $(date)" >> /etc/motd
-        
-        echo ">>> Настройка завершена"
-
-  # Опционально: добавляем плавающий IP если нужен доступ извне
-  floating_ip:
-    type: OS::Neutron::FloatingIP
-    properties:
-      floating_network: external-network  # или public, зависит от настройки OpenStack
-      port_id: { get_attr: [my_server, addresses, { get_param: network }, 0, port] }
-    condition: false  # Отключаем, если не нужен внешний IP
-
-outputs:
-  server_ip:
-    description: IP address of the server
-    value: { get_attr: [my_server, first_address] }
-  server_name:
-    description: Name of the server
-    value: { get_attr: [my_server, name] }
+stage('Diagnose Network Issues') {
+    steps {
+        script {
+            sh """
+                echo "=== ДИАГНОСТИКА СЕТИ ==="
+                echo "Проверка сервера ${env.TARGET_SERVER_IP}"
+                
+                # Проверяем, пингуется ли сервер
+                echo "1. Проверка ICMP (ping):"
+                ping -c 4 ${env.TARGET_SERVER_IP} || echo "PING не работает (возможно запрещено)"
+                
+                # Проверяем открытые порты
+                echo "2. Проверка открытых портов:"
+                nc -zv ${env.TARGET_SERVER_IP} 22 2>&1 || echo "Порт 22 закрыт"
+                nc -zv ${env.TARGET_SERVER_IP} 80 2>&1 || echo "Порт 80 закрыт"
+                nc -zv ${env.TARGET_SERVER_IP} 8080 2>&1 || echo "Порт 8080 закрыт"
+                
+                # Получаем информацию о сервере из OpenStack
+                echo "3. Информация о сервере из OpenStack:"
+                . /home/ubuntu/openrc.sh
+                
+                SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
+                echo "Server ID: \$SERVER_ID"
+                
+                echo "Статус сервера:"
+                openstack server show \$SERVER_ID -c status -c addresses -c security_groups
+                
+                echo "Список security groups:"
+                openstack server show \$SERVER_ID -f value -c security_groups
+                
+                echo "=== КОНЕЦ ДИАГНОСТИКИ ==="
+            """
+        }
+    }
+}
