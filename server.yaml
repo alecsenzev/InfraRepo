@@ -8,7 +8,7 @@ resources:
     properties:
       name: Nikita-ML-Server       # Имя будущей машины
       image: ubuntu-20.04           # Образ
-      flavor: m1.tiny              # Размер изночальный m1.small
+      flavor: m1.medium              # Размер изночальный m1.small
       key_name: Nikita_Alecsentsev  # Ключ
       networks:
         - network: sutdents-net     # Сеть
