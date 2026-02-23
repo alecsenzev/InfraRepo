@@ -76,7 +76,6 @@ pipeline {
         stage('Deploy Application on Target Server') {
             steps {
                 script {
-                    // Проверяем доступность сервера по SSH
                     sh """
                         echo "Ожидаем доступность сервера ${env.TARGET_SERVER_IP} по SSH..."
                         
@@ -91,7 +90,7 @@ pipeline {
                         done
                         
                         # Клонируем репозиторий приложения и деплоим
-                        ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_SERVER_IP} "
+                        ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_SERVER_IP} '
                             # Клонируем репозиторий
                             if [ -d ~/SimpleApp ]; then
                                 rm -rf ~/SimpleApp
@@ -107,10 +106,10 @@ pipeline {
                             pkill -f app.py || true
                             
                             # Запускаем приложение в screen
-                            screen -dm bash -c 'python3 app.py'
+                            screen -dm bash -c "python3 app.py"
                             
                             echo "✅ Приложение запущено"
-                        "
+                        '
                     """
                 }
             }
@@ -164,8 +163,8 @@ pipeline {
                         SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
                         SERVER_STATUS=\$(openstack server show \$SERVER_ID -f value -c status)
                         
-                        # Создаем файл с информацией о деплое
-                        cat > deployment-info.txt << EOF
+                        # Создаем файл с информацией о деплое (исправлено экранирование)
+                        cat > deployment-info.txt << 'EOF'
                         Деплой приложения на $(date)
                         
                         Информация о сервере:
@@ -182,7 +181,14 @@ pipeline {
                         - Health check: http://${env.TARGET_SERVER_IP}:8000/health
                         EOF
                         
+                        # Теперь подставляем реальные значения
+                        sed -i "s|\\\${env.TARGET_SERVER_IP}|${env.TARGET_SERVER_IP}|g" deployment-info.txt
+                        sed -i "s|\\\$SERVER_ID|\$SERVER_ID|g" deployment-info.txt
+                        sed -i "s|\\\$SERVER_STATUS|\$SERVER_STATUS|g" deployment-info.txt
+                        sed -i "s|\\\$STACK_STATUS|\$STACK_STATUS|g" deployment-info.txt
+                        
                         echo "✅ Информация сохранена в deployment-info.txt"
+                        cat deployment-info.txt
                     """
                     
                     // Сохраняем артефакты
