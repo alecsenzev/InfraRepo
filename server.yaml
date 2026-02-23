@@ -7,7 +7,7 @@ resources:
     type: OS::Nova::Server
     properties:
       name: Nikita-ML-Server       # Имя будущей машины
-      image: ununtu-22.04           # Образ
+      image: ubuntu-22.04           # Образ
       flavor: m1.small              # Размер
       key_name: Nikita_Alecsentsev  # Ключ
       networks:
