@@ -48,7 +48,7 @@ pipeline {
                     // Получаем IP созданного сервера (имя из шаблона: Nikita-ML-Server)
                     env.TARGET_IP = sh(
                         script: """
-                            source ~/openrc.sh
+                            source . ~/openrc.sh
                             openstack server list --name Nikita-ML-Server -f value -c Networks | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
