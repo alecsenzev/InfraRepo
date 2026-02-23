@@ -1,27 +1,28 @@
 node('Nikita_label') {
-    stage('Checkout') {
-        checkout scm
-    }
-    
-    stage('Get Artifact from Lab2') {
-        step([$class: 'CopyArtifact',
-              projectName: 'My_project',
-              filter: 'target/*.jar',
+    stage('Get Artifact') {
+        step([$class: 'CopyArtifact', 
+              projectName: 'My_project', 
+              filter: 'target/*.jar', 
               target: ''])
     }
     
-    stage('Deploy to Lab3 Server') {
+    stage('Deploy') {
         sh '''
-            # Настройки
+            # Переменные
             TARGET_IP="192.168.199.161"
             TARGET_USER="debian"
             SSH_KEY="/home/ubuntu/Nikita_Alecsentsev.pem"
-            JAR_FILE=$(ls target/*.jar | head -1)
             
-            echo "Копируем $JAR_FILE на сервер $TARGET_IP"
+            # Находим JAR файл
+            JAR_FILE=$(ls target/*.jar | head -1)
+            echo "Найден артефакт: $JAR_FILE"
+            
+            # Копируем на целевой сервер
+            echo "Копирование на сервер $TARGET_IP..."
             scp -i $SSH_KEY -o StrictHostKeyChecking=no $JAR_FILE $TARGET_USER@$TARGET_IP:/tmp/
             
-            echo "Запускаем приложение на сервере"
+            # Запускаем на целевом сервере
+            echo "Запуск приложения..."
             ssh -i $SSH_KEY -o StrictHostKeyChecking=no $TARGET_USER@$TARGET_IP "
                 sudo mkdir -p /opt/restoring-app
                 sudo chown $TARGET_USER:$TARGET_USER /opt/restoring-app
@@ -35,15 +36,15 @@ node('Nikita_label') {
                 nohup java -jar *.jar > ~/app.log 2>&1 &
                 sleep 3
                 
-                echo 'Приложение запущено'
-                ps aux | grep java
+                echo 'Приложение запущено с PID:'
+                pgrep -f 'java.*jar'
             "
         '''
     }
     
     stage('Verify') {
         sh '''
-            ssh -i /home/ubuntu/Nikita_Alecsentsev.pem -o StrictHostKeyChecking=no debian@192.168.199.161 "tail -5 ~/app.log"
+            ssh -i /home/ubuntu/Nikita_Alecsentsev.pem -o StrictHostKeyChecking=no debian@192.168.199.161 "tail -5 ~/app.log || echo 'Лог пока пуст'"
         '''
     }
 }
