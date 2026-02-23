@@ -222,16 +222,27 @@ EOF
     
     post {
         always {
-            echo "=== ИТОГОВАЯ ИНФОРМАЦИЯ ==="
-            if (env.TARGET_SERVER_IP) {
-                echo "Приложение: http://${env.TARGET_SERVER_IP}:${APP_PORT}"
+            script {
+                echo "=== ИТОГОВАЯ ИНФОРМАЦИЯ ==="
+                if (env.TARGET_SERVER_IP) {
+                    echo "Приложение: http://${env.TARGET_SERVER_IP}:${APP_PORT}"
+                } else {
+                    echo "IP адрес сервера не получен. Проверьте предыдущие шаги."
+                }
             }
         }
         success {
-            echo "🎉 Деплой успешно завершен!"
+            script {
+                echo "🎉 Деплой успешно завершен!"
+                if (env.TARGET_SERVER_IP) {
+                    echo "Приложение доступно по адресу: http://${env.TARGET_SERVER_IP}:${APP_PORT}"
+                }
+            }
         }
         failure {
-            echo "❌ Деплой не удался. Проверьте логи выше."
+            script {
+                echo "❌ Деплой не удался. Проверьте логи выше."
+            }
         }
     }
 }
