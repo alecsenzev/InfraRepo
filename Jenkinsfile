@@ -45,7 +45,7 @@ pipeline {
                         SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
                         echo "Server ID: \$SERVER_ID"
                         
-                        # Получаем IP адрес сервера (исправленная команда)
+                        # Получаем IP адрес сервера
                         SERVER_IP=\$(openstack server show \$SERVER_ID -f value -c addresses | grep -oE '[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}' | head -1)
                         
                         # Если не нашли IP через regex, пробуем другой способ
@@ -152,6 +152,9 @@ pipeline {
         stage('Collect Artifacts') {
             steps {
                 script {
+                    // Получаем текущую дату в Groovy
+                    def currentDate = new Date().format('yyyy-MM-dd HH:mm:ss')
+                    
                     // Собираем информацию о деплое
                     sh """
                         . /home/ubuntu/openrc.sh
@@ -163,29 +166,21 @@ pipeline {
                         SERVER_ID=\$(openstack stack resource list $STACK_NAME -f value -c physical_resource_id | head -1)
                         SERVER_STATUS=\$(openstack server show \$SERVER_ID -f value -c status)
                         
-                        # Создаем файл с информацией о деплое (исправлено экранирование)
-                        cat > deployment-info.txt << 'EOF'
-                        Деплой приложения на $(date)
-                        
-                        Информация о сервере:
-                        - IP адрес: ${env.TARGET_SERVER_IP}
-                        - ID сервера: \$SERVER_ID
-                        - Статус сервера: \$SERVER_STATUS
-                        
-                        Информация о стеке Heat:
-                        - Имя стека: $STACK_NAME
-                        - Статус стека: \$STACK_STATUS
-                        
-                        Информация о приложении:
-                        - URL приложения: http://${env.TARGET_SERVER_IP}:8000
-                        - Health check: http://${env.TARGET_SERVER_IP}:8000/health
-                        EOF
-                        
-                        # Теперь подставляем реальные значения
-                        sed -i "s|\\\${env.TARGET_SERVER_IP}|${env.TARGET_SERVER_IP}|g" deployment-info.txt
-                        sed -i "s|\\\$SERVER_ID|\$SERVER_ID|g" deployment-info.txt
-                        sed -i "s|\\\$SERVER_STATUS|\$SERVER_STATUS|g" deployment-info.txt
-                        sed -i "s|\\\$STACK_STATUS|\$STACK_STATUS|g" deployment-info.txt
+                        # Создаем файл с информацией о деплое (используем echo вместо heredoc)
+                        echo "Деплой приложения на ${currentDate}" > deployment-info.txt
+                        echo "" >> deployment-info.txt
+                        echo "Информация о сервере:" >> deployment-info.txt
+                        echo "- IP адрес: ${env.TARGET_SERVER_IP}" >> deployment-info.txt
+                        echo "- ID сервера: \$SERVER_ID" >> deployment-info.txt
+                        echo "- Статус сервера: \$SERVER_STATUS" >> deployment-info.txt
+                        echo "" >> deployment-info.txt
+                        echo "Информация о стеке Heat:" >> deployment-info.txt
+                        echo "- Имя стека: $STACK_NAME" >> deployment-info.txt
+                        echo "- Статус стека: \$STACK_STATUS" >> deployment-info.txt
+                        echo "" >> deployment-info.txt
+                        echo "Информация о приложении:" >> deployment-info.txt
+                        echo "- URL приложения: http://${env.TARGET_SERVER_IP}:8000" >> deployment-info.txt
+                        echo "- Health check: http://${env.TARGET_SERVER_IP}:8000/health" >> deployment-info.txt
                         
                         echo "✅ Информация сохранена в deployment-info.txt"
                         cat deployment-info.txt
