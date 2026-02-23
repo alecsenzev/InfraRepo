@@ -44,14 +44,26 @@ pipeline {
         stage('Get Target Server IP') {
             steps {
                 script {
-                    // Получаем IP созданного сервера (используем имя стека для поиска)
+                    // Получаем IP созданного сервера (ищем по части имени)
                     env.TARGET_IP = sh(
                         script: """
                             . /home/ubuntu/openrc.sh
-                            openstack server list --name "$STACK_NAME" -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
+                            openstack server list --name ".*${STACK_NAME}.*" -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
                     ).trim()
+                    
+                    if (env.TARGET_IP.isEmpty()) {
+                        // Если не нашли, пробуем получить через stack show
+                        echo "Поиск по имени не дал результатов, пробуем альтернативный метод..."
+                        env.TARGET_IP = sh(
+                            script: """
+                                . /home/ubuntu/openrc.sh
+                                openstack stack show $STACK_NAME -f value -c outputs | grep -o '"ip":[^,]*' | cut -d'"' -f4 || true
+                            """,
+                            returnStdout: true
+                        ).trim()
+                    }
                     
                     if (env.TARGET_IP.isEmpty()) {
                         error "Не удалось получить IP адрес сервера"
