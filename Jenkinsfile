@@ -1,5 +1,5 @@
 pipeline {
-    agent { label params.AGENT_LABEL }   // запуск на инструментальном сервере
+    agent { label params.AGENT_LABEL }
 
     options {
         timestamps()
@@ -15,7 +15,7 @@ pipeline {
     environment {
         STACK_NAME = 'Nikita-stack'
         HEAT_TEMPLATE = 'server.yaml'
-        KEY_PATH = '/home/ubuntu/Nikita_Alecsentsev.pem'   // путь к ключу на агенте
+        KEY_PATH = '/home/ubuntu/Nikita_Alecsentsev.pem'
         REMOTE_USER = 'debian'
         APP_REPO = 'https://github.com/alecsenzev/RestoringValuesSPbPU.git'
     }
@@ -31,7 +31,7 @@ pipeline {
             steps {
                 script {
                     sh '''
-                        . ~/openrc.sh
+                        . /home/ubuntu/openrc.sh
                         # Удалить предыдущий стек, если существует
                         openstack stack show $STACK_NAME && openstack stack delete $STACK_NAME --yes --wait || true
                         # Создать новый стек
@@ -40,19 +40,22 @@ pipeline {
                 }
             }
         }
-        
-        
+
         stage('Get Target Server IP') {
             steps {
                 script {
-                    // Получаем IP созданного сервера (имя из шаблона: Nikita-ML-Server)
+                    // Получаем IP созданного сервера (используем имя стека для поиска)
                     env.TARGET_IP = sh(
                         script: """
-                            . ~/openrc.sh
-                            openstack server list --name ${STACK_NAME} -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
+                            . /home/ubuntu/openrc.sh
+                            openstack server list --name "$STACK_NAME" -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
                     ).trim()
+                    
+                    if (env.TARGET_IP.isEmpty()) {
+                        error "Не удалось получить IP адрес сервера"
+                    }
                     echo "Target server IP: ${TARGET_IP}"
                 }
             }
@@ -61,16 +64,18 @@ pipeline {
         stage('Deploy Application on Target Server') {
             steps {
                 script {
-                    // Копируем ключ (если необходимо) и выполняем подготовку на удалённом сервере
                     sh """
                         ssh -o StrictHostKeyChecking=no -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP} '
                             set -e
-                            # Клонирование репозитория с приложением
-                            git clone $APP_REPO ~/app || true
+                            echo "=== Клонирование репозитория ==="
+                            git clone $APP_REPO ~/app || (cd ~/app && git pull)
                             cd ~/app
-                            # Создание виртуального окружения и установка зависимостей
+                            
+                            echo "=== Создание виртуального окружения ==="
                             python3 -m venv .venv
-                            source .venv/bin/activate
+                            . .venv/bin/activate
+                            
+                            echo "=== Установка зависимостей ==="
                             pip install -U pip
                             pip install -r requirements.txt
                         '
@@ -84,7 +89,9 @@ pipeline {
                 sh """
                     ssh -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP} '
                         cd ~/app
-                        source .venv/bin/activate
+                        . .venv/bin/activate
+                        
+                        # Очистка переменных окружения
                         export LOG_LEVEL=INFO
                         export WEBSOCKET_HOST=127.0.0.1
                         export BUSINESS_HTTP_BASE=http://127.0.0.1:8000
@@ -93,51 +100,59 @@ pipeline {
                         export DASH_HOST=0.0.0.0
                         export DASH_PORT=${DASH_PORT}
 
-                        # Очистка занятых портов
+                        echo "=== Очистка занятых портов ==="
                         for p in 8000 8050 8051 8092 8093 8094 8095; do
-                            fuser -k \${p}/tcp 2>/dev/null || true
+                            sudo fuser -k \${p}/tcp 2>/dev/null || true
                         done
 
                         mkdir -p run_output
 
-                        # Запуск компонентов
+                        echo "=== Запуск компонентов ==="
+                        # Запуск симулятора
                         python Simulator/simulator.py > run_output/simulator.log 2>&1 &
                         echo \$! > run_output/simulator.pid
+                        echo "Симулятор запущен с PID: \$(cat run_output/simulator.pid)"
                         sleep 3
 
+                        # Запуск receiver
                         python Reciever/reciever.py > run_output/reciever.log 2>&1 &
                         echo \$! > run_output/reciever.pid
+                        echo "Receiver запущен с PID: \$(cat run_output/reciever.pid)"
                         sleep 3
 
+                        # Запуск business
                         python Business/business.py > run_output/business.log 2>&1 &
                         echo \$! > run_output/business.pid
+                        echo "Business запущен с PID: \$(cat run_output/business.pid)"
                         sleep 3
 
+                        # Запуск Dash
                         if [ "${DASH_MODE}" = "test" ]; then
                             python GUI/dash_app_test.py > run_output/dash.log 2>&1 &
                         else
                             python GUI/dash_app_prod.py > run_output/dash.log 2>&1 &
                         fi
                         echo \$! > run_output/dash.pid
+                        echo "Dash запущен с PID: \$(cat run_output/dash.pid)"
                         sleep 5
 
-                        # Проверка health-эндпоинтов (если реализованы)
-                        curl -fsS http://127.0.0.1:8000/healthz > run_output/health_business.json || true
-                        curl -fsS http://127.0.0.1:${DASH_PORT}/healthz > run_output/health_dash.json || true
+                        echo "=== Проверка health-эндпоинтов ==="
+                        curl -fsS http://127.0.0.1:8000/healthz > run_output/health_business.json || echo "Business health check failed" > run_output/health_business.json
+                        curl -fsS http://127.0.0.1:${DASH_PORT}/healthz > run_output/health_dash.json || echo "Dash health check failed" > run_output/health_dash.json
 
-                        # Окно ручной проверки (5 минут) – пропускаем для автоматизации
-                        # Сразу собираем артефакты, но сначала дадим поработать 30 сек
+                        echo "=== Приложение работает, сбор данных 30 секунд ==="
                         sleep 30
 
-                        # Остановка процессов
+                        echo "=== Остановка процессов ==="
                         kill \$(cat run_output/simulator.pid) 2>/dev/null || true
                         kill \$(cat run_output/reciever.pid) 2>/dev/null || true
                         kill \$(cat run_output/business.pid) 2>/dev/null || true
                         kill \$(cat run_output/dash.pid) 2>/dev/null || true
                         sleep 2
 
-                        # Упаковка артефактов
+                        echo "=== Упаковка артефактов ==="
                         tar -czf artifacts.tgz run_output Reciever/*.csv Business/*.csv 2>/dev/null || tar -czf artifacts.tgz run_output
+                        echo "Артефакты упакованы в artifacts.tgz"
                     '
                 """
             }
@@ -146,17 +161,30 @@ pipeline {
         stage('Collect Artifacts') {
             steps {
                 sh """
-                    scp -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP}:~/app/artifacts.tgz . || true
+                    scp -i $KEY_PATH ${REMOTE_USER}@${TARGET_IP}:~/app/artifacts.tgz . || echo "No artifacts found"
                 """
-                archiveArtifacts artifacts: 'artifacts.tgz'
+                archiveArtifacts artifacts: 'artifacts.tgz', fingerprint: true, allowEmptyArchive: true
             }
         }
     }
 
     post {
         always {
-            // Дополнительная очистка портов на агенте (необязательно)
-            sh 'for p in 8000 8050 8051; do fuser -k \${p}/tcp 2>/dev/null || true; done'
+            // Очистка портов на агенте
+            sh '''
+                for p in 8000 8050 8051; do
+                    fuser -k ${p}/tcp 2>/dev/null || true
+                done
+            '''
+            echo "Сборка завершена. Статус: ${currentBuild.result ?: 'SUCCESS'}"
+        }
+        
+        success {
+            echo "✅ Сборка успешно выполнена! Артефакты сохранены."
+        }
+        
+        failure {
+            echo "❌ Сборка завершилась с ошибкой. Проверьте логи выше."
         }
     }
 }
