@@ -19,8 +19,11 @@ resources:
         owner: "Nikita Alecsentsev"
       
       # Скрипт для первоначальной настройки (user_data)
-      user_data: |
+      user_data:
+      |
         #!/bin/bash
+        apt update
+        apt install -y python3-pip python3-venv git postgresql
         echo "Сервер создан через Heat" > /etc/motd
         echo "Проект: RestoringValuesSPbPU" >> /etc/motd
         echo "Дата создания: $(date)" >> /etc/motd
