@@ -63,7 +63,7 @@ pipeline {
                     env.TARGET_IP = sh(
                         script: """
                             . /home/ubuntu/openrc.sh
-                            openstack server show "$SERVER_ID" -f value -c addresses | awk -F'=' '{print \$2}'
+                            openstack server show "$SERVER_ID" -f shell | grep addresses | cut -d'=' -f2 | tr -d '"' | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
                     ).trim()
