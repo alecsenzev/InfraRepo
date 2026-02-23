@@ -49,7 +49,7 @@ pipeline {
                     env.TARGET_IP = sh(
                         script: """
                             . ~/openrc.sh
-                            openstack server list --name Nikita-ML-Server -f value -c Networks | awk -F'=' '{print \$2}'
+                            openstack server list --name ${STACK_NAME} -f value -c Networks | head -1 | awk -F'=' '{print \$2}'
                         """,
                         returnStdout: true
                     ).trim()
